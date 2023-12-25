@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+
+# 라이브러리의 타겟을 가져오기 위한 파일 포함
+include("${CMAKE_CURRENT_LIST_DIR}/LRTargets.cmake")
+
+# 필요한 경우 추가적인 설정이나 변수를 여기에 추가할 수 있습니다.
+# 예를 들어, 라이브러리의 의존성이 있다면 여기서 처리할 수 있습니다.
+
