@@ -162,21 +162,6 @@ void print_LR_info(LR_info lr_info)
         std::cout << G << std::endl;
     }
 }
-SE3 RPYXYZ2TrasnformMatrix(double roll, double pitch, double yaw,
-                           double x, double y, double z)
-{
-    SE3 transform = SE3::Identity();
-    SO3 rotation;
-    rotation = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-
-    // 위치 부분
-    Vector3d translation(x, y, z);
-    transform.block<3, 3>(0, 0) = rotation;
-    transform.block<3, 1>(0, 3) = translation;
-
-    return transform;
-}
-
 Eigen::MatrixXd list_Slist_to_matrix_Slist(std::vector<Vector6d> Slist)
 {
     int N = Slist.size();
@@ -188,6 +173,19 @@ Eigen::MatrixXd list_Slist_to_matrix_Slist(std::vector<Vector6d> Slist)
     return ret_Slist;
 }
 
+SE3 Pose_to_SE3(urdf::Pose pose){
+    SE3 T= SE3::Identity();
+    T(0,3) = pose.position.x;
+    T(1,3) = pose.position.y;
+    T(2,3) = pose.position.z;
+    
+    double quat_w,quat_x,quat_y,quat_z;
+    pose.rotation.getQuaternion(quat_x,quat_y,quat_z,quat_w);
+    Eigen::Quaterniond quat=Eigen::Quaterniond(quat_w,quat_x,quat_y,quat_z);
+    Eigen::Matrix3d R = quat.normalized().toRotationMatrix();
+    T.block<3, 3>(0, 0)=R;
+    return T;
+}
 
 void LR_Control::LRSetup(const char *urdf_path,Vector3d g){
     this->g = g;
@@ -199,7 +197,7 @@ void LR_Control::LRSetup(const char *urdf_path)
     pinocchio::urdf::buildModel(urdf_path, model);
     model.gravity.linear(this->g);
     //LR setup
-    urdf::ModelInterfaceSharedPtr robot = urdf::parseURDFFile(urdf_path);
+ urdf::ModelInterfaceSharedPtr robot = urdf::parseURDFFile(urdf_path);
     if (!robot)
     {
         std::cerr << "ERROR: Model Parsing the URDF failed" << std::endl;
@@ -215,9 +213,13 @@ void LR_Control::LRSetup(const char *urdf_path)
     std::vector<SE3> Mlist;
     std::vector<Vector6d> Slist;
 
-    SE3 T = SE3::Identity();
+    SE3 M= SE3::Identity();
+
     SE3 prev_T_com = SE3::Identity();
+    SE3 T_jnt = SE3::Identity();
+    SE3 T_com = SE3::Identity();
     int count = 0;
+    SE3 M_prev = SE3::Identity();
     while (!stack.empty())
     {
         auto current = stack.top();
@@ -230,6 +232,7 @@ void LR_Control::LRSetup(const char *urdf_path)
             const auto &inertial = link->inertial;
             const auto &joint = link->parent_joint;
             double mass = inertial->mass;
+            std::cout<<joint->name<<std::endl;
             G(0, 0) = mass;
             G(1, 1) = mass;
             G(2, 2) = mass;
@@ -239,32 +242,22 @@ void LR_Control::LRSetup(const char *urdf_path)
             G(3, 4) = G(4, 3) = inertial->ixy;
             G(3, 5) = G(5, 3) = inertial->ixz;
 
-            const auto &position = joint->parent_to_joint_origin_transform.position;
-            double jnt_x, jnt_y, jnt_z, jnt_roll, jnt_pitch, jnt_yaw, com_x, com_y, com_z, com_roll, com_pitch, com_yaw;
-            joint->parent_to_joint_origin_transform.rotation.getRPY(jnt_roll, jnt_pitch, jnt_yaw);
-            jnt_x = joint->parent_to_joint_origin_transform.position.x;
-            jnt_y = joint->parent_to_joint_origin_transform.position.y;
-            jnt_z = joint->parent_to_joint_origin_transform.position.z;
-
-            inertial->origin.rotation.getRPY(com_roll, com_pitch, com_yaw);
-            com_x = inertial->origin.position.x;
-            com_y = inertial->origin.position.y;
-            com_z = inertial->origin.position.z;
-
-            SE3 Tcom = RPYXYZ2TrasnformMatrix(com_roll, com_pitch, com_yaw, com_x, com_y, com_z);
-            SE3 Tcom_to_jnt = RPYXYZ2TrasnformMatrix(jnt_roll, jnt_pitch, jnt_yaw, jnt_x, jnt_y, jnt_z);
-            SE3 M = lr::TransInv(prev_T_com) * T * Tcom;
-            prev_T_com = T * Tcom;
-            T = T * Tcom * Tcom_to_jnt;
-            Matrix3d R = T.block<3, 3>(0, 0);
-            Vector3d w = R * Vector3d(joint->axis.x, joint->axis.y, joint->axis.z);
-            Vector3d p = T.block<3, 1>(0, 3);
+            const urdf::Pose &T_com_to_jnt_ = joint->parent_to_joint_origin_transform;
+            const urdf::Pose &T_jnt_to_com_ = inertial->origin;
+            SE3 T_com_to_jnt = Pose_to_SE3(T_com_to_jnt_);
+            SE3 T_jnt_to_com = Pose_to_SE3(T_jnt_to_com_);
+            T_jnt = T_jnt*T_com_to_jnt;
+            SO3 R_jnt = T_jnt.block<3, 3>(0, 0);
+            Vector3d p = T_jnt.block<3, 1>(0, 3);
+            Vector3d w = R_jnt*Vector3d(joint->axis.x, joint->axis.y, joint->axis.z);
             Vector3d v = -w.cross(p);
-
-            if (link->parent_joint->type == urdf::Joint::REVOLUTE || link->parent_joint->type == urdf::Joint::PRISMATIC)
+            SE3 M_now = T_jnt*T_jnt_to_com;
+            SE3 M_prev_now = TransInv(M_prev)*M_now;
+            M = M_now;
+            T_com = T_jnt*T_jnt_to_com;
+            if (link->parent_joint->type == urdf::Joint::REVOLUTE || link->parent_joint->type == urdf::Joint::PRISMATIC )
             {
-                std::cout << "count : " << count << std::endl;
-
+                //std::cout << "count : " << count << std::endl;
                 Glist.push_back(G);
                 Vector6d S = Vector6d::Zero();
                 S.block<3, 1>(0, 0) = v;
@@ -272,7 +265,13 @@ void LR_Control::LRSetup(const char *urdf_path)
                 Slist.push_back(S);
                 if (count++ > 0)
                 {
-                    Mlist.push_back(M);
+                    Mlist.push_back(M_prev_now);
+                }
+                M_prev=M_now;
+            }
+            else if (link->parent_joint->type == urdf::Joint::FIXED){
+                if(link->child_links.size()==0){
+                    Mlist.push_back(M_prev_now);
                 }
             }
         }
@@ -285,10 +284,8 @@ void LR_Control::LRSetup(const char *urdf_path)
         }
     }
     Eigen::MatrixXd Slist_ = list_Slist_to_matrix_Slist(Slist);
-    SE3 M = T;
     LR_info lr_info;
     lr_info.M = M;
-    Mlist.push_back(lr::TransInv(prev_T_com) * M);
     lr_info.Slist = Slist_;
     lr_info.Mlist = Mlist;
     lr_info.Glist = Glist;
